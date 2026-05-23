@@ -2,21 +2,17 @@
   "mcpServers": {
     "thetube": {
       "command": "node",
-      "args": ["src/index.js"],
+      "args": ["src/proxy.js", "--server", "http://localhost:8080/fs"],
       "cwd": "/Users/bfb/github/theTube/theTube-mcp",
-      "env": {
-        "AWS_REGION": "us-east-1",
-        "LOG_BUCKET": "thetube-logs",
-        "LOG_PREFIX": "cf-logs/"
-      },
       "disabled": false,
       "autoApprove": [
-        "list_recent_logs",
-        "read_log",
-        "list_lambdas",
-        "get_lambda_config",
-        "get_distribution",
-        "query_captures"
+        "list_directory",
+        "read_file",
+        "query_captures",
+        "add_capture",
+        "list_tokens",
+        "add_session_note",
+        "recent_sessions"
       ]
     }
   }
