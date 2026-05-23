@@ -1,0 +1,19 @@
+{
+  "name": "thetube-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for theTube — read-only AWS access, CloudFront log queries, state tracking",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudfront": "^3.600.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.600.0",
+    "@aws-sdk/client-lambda": "^3.600.0",
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "better-sqlite3": "^11.0.0"
+  }
+}

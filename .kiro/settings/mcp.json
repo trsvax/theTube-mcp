@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "thetube": {
+      "command": "node",
+      "args": ["src/index.js"],
+      "cwd": "/Users/bfb/github/theTube/theTube-mcp",
+      "env": {
+        "AWS_REGION": "us-east-1",
+        "LOG_BUCKET": "thetube-logs",
+        "LOG_PREFIX": "cf-logs/"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "list_recent_logs",
+        "read_log",
+        "list_lambdas",
+        "get_lambda_config",
+        "get_distribution",
+        "query_captures"
+      ]
+    }
+  }
+}
