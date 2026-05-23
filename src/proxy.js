@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * MCP Proxy — translates MCP tool calls to WebDAV requests + SQLite queries.
+ * MCP Proxy — translates MCP tool calls to WebDAV reads + SQLite state.
+ * 
+ * The WebDAV server is the filesystem. This proxy is a thin translation layer.
  * 
  * Usage:
  *   node src/proxy.js --server http://localhost:8080/fs
- *   node src/proxy.js --server https://thetube.today/fs
  */
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -15,7 +16,6 @@ import {
 import Database from "node:sqlite";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
-import { existsSync } from "node:fs";
 
 // Parse CLI args
 const { values } = parseArgs({
@@ -81,7 +81,6 @@ async function propfind(path) {
   if (!res.ok) throw new Error(`PROPFIND ${url} → ${res.status}`);
   const xml = await res.text();
   
-  // Simple XML parse — extract href and displayname from responses
   const entries = [];
   const responses = xml.split("<D:response>").slice(1);
   for (const r of responses) {
@@ -95,7 +94,7 @@ async function propfind(path) {
 
 // --- MCP Server ---
 const server = new Server(
-  { name: "thetube-proxy", version: "0.2.0" },
+  { name: "thetube-proxy", version: "0.3.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -103,22 +102,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "list_directory",
-      description: "List contents of a virtual directory (e.g. /journals, /journals/build-mcp)",
+      description: "List contents of a virtual directory. The filesystem has: post types (journal/, post/, draft/), each containing post folders with post.md inside; and logs/ with dates containing hourly .tsv files.",
       inputSchema: {
         type: "object",
         properties: {
-          path: { type: "string", description: "Directory path (e.g. / or /journals or /journals/build-mcp)" },
+          path: { type: "string", description: "Directory path (e.g. /, /journal, /logs, /logs/2026-05-23)" },
         },
         required: ["path"],
       },
     },
     {
       name: "read_file",
-      description: "Read a file from the virtual filesystem (e.g. /journals/build-mcp/post.md)",
+      description: "Read a file from the virtual filesystem. Posts at /type/slug/post.md, logs at /logs/YYYY-MM-DD/HH.tsv (tab-separated CloudFront log entries).",
       inputSchema: {
         type: "object",
         properties: {
-          path: { type: "string", description: "File path" },
+          path: { type: "string", description: "File path (e.g. /journal/the-share-system/post.md or /logs/2026-05-23/22.tsv)" },
         },
         required: ["path"],
       },
@@ -190,7 +189,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "list_directory": {
         const dirPath = args.path === "/" ? "/" : args.path.replace(/\/$/, "");
         const entries = await propfind(dirPath);
-        // Skip the first entry (it's the directory itself)
         const contents = entries.slice(1).map(e => ({
           name: e.name,
           type: e.isDir ? "directory" : "file",

@@ -1,6 +1,6 @@
 {
   "name": "thetube-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP proxy — thin layer over WebDAV + SQLite state",
   "type": "module",
   "main": "src/proxy.js",
@@ -9,6 +9,9 @@
     "webdav": "node webdav/server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudfront": "^3.1053.0",
+    "@aws-sdk/client-lambda": "^3.1053.0",
+    "@aws-sdk/client-s3": "^3.1053.0",
     "@modelcontextprotocol/sdk": "^1.0.0"
   }
 }
