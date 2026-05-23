@@ -12,7 +12,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import Database from "better-sqlite3";
+import Database from "node:sqlite";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { existsSync } from "node:fs";

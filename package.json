@@ -1,19 +1,14 @@
 {
   "name": "thetube-mcp",
-  "version": "0.1.0",
-  "description": "MCP server for theTube — read-only AWS access, CloudFront log queries, state tracking",
+  "version": "0.2.0",
+  "description": "MCP proxy — thin layer over WebDAV + SQLite state",
   "type": "module",
-  "main": "src/index.js",
+  "main": "src/proxy.js",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "start": "node src/proxy.js",
+    "webdav": "node webdav/server.js"
   },
   "dependencies": {
-    "@aws-sdk/client-cloudfront": "^3.600.0",
-    "@aws-sdk/client-cloudwatch-logs": "^3.600.0",
-    "@aws-sdk/client-lambda": "^3.600.0",
-    "@aws-sdk/client-s3": "^3.600.0",
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "better-sqlite3": "^11.0.0"
+    "@modelcontextprotocol/sdk": "^1.0.0"
   }
 }
