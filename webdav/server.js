@@ -1,4 +1,5 @@
 import http from "node:http";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { gunzipSync, inflateRawSync } from "node:zlib";
@@ -122,6 +123,59 @@ async function getLogContent(date, hour) {
     }
   }
   return lines.join("\n");
+}
+
+// --- Tube helpers ---
+
+function ensureTubeDir(...parts) {
+  const dir = path.join(TUBE_DIR, ...parts);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function tubeListApps() {
+  ensureTubeDir();
+  return fs.readdirSync(TUBE_DIR, { withFileTypes: true })
+    .filter(d => d.isDirectory())
+    .map(d => d.name);
+}
+
+function tubeListActions(app) {
+  const dir = path.join(TUBE_DIR, app);
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter(d => d.isDirectory())
+    .map(d => d.name);
+}
+
+function tubeListRequests(app, action) {
+  const dir = path.join(TUBE_DIR, app, action);
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir, { withFileTypes: true })
+    .filter(f => f.isFile())
+    .map(f => {
+      const stat = fs.statSync(path.join(dir, f.name));
+      return {
+        name: f.name,
+        size: stat.size,
+        modified: stat.mtime.toUTCString(),
+        type: f.name.endsWith(".json") ? "application/json" : "application/octet-stream",
+      };
+    });
+}
+
+function tubeReadFile(app, action, filename) {
+  const filepath = path.join(TUBE_DIR, app, action, filename);
+  if (!fs.existsSync(filepath)) return null;
+  return fs.readFileSync(filepath, "utf-8");
+}
+
+function tubeWriteRequest(app, action, requestId, metadata, body) {
+  const dir = ensureTubeDir(app, action);
+  fs.writeFileSync(path.join(dir, `${requestId}.request`), JSON.stringify(metadata, null, 2));
+  if (body && body.length > 0) {
+    fs.writeFileSync(path.join(dir, `${requestId}.body`), body);
+  }
 }
 
 // --- AWS helpers ---
@@ -260,7 +314,10 @@ function text(res, content, type) {
 }
 
 // Reserved top-level names (not post types)
-const RESERVED = ["logs", "aws"];
+const RESERVED = ["logs", "aws", "tube"];
+
+// Tube storage — local directory for dev, S3 prefix for production
+const TUBE_DIR = process.env.TUBE_DIR || path.join(process.env.HOME || "/tmp", ".tube");
 
 // --- Route handler ---
 
@@ -277,6 +334,13 @@ async function handleRequest(req, res) {
   }
 
   try {
+    // Ignore macOS resource fork requests
+    if (url.includes("/._")) {
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // PROPFIND
     // ═══════════════════════════════════════════════════════════════════════
@@ -291,6 +355,7 @@ async function handleRequest(req, res) {
           ...types.map(t => dirResponse(`${BASE_PATH}/${t}/`, t)),
           dirResponse(`${BASE_PATH}/logs/`, "logs"),
           dirResponse(`${BASE_PATH}/aws/`, "aws"),
+          dirResponse(`${BASE_PATH}/tube/`, "tube"),
         ];
         res.writeHead(207, { "Content-Type": "application/xml; charset=utf-8" });
         res.end(multistatus(responses));
@@ -375,6 +440,7 @@ async function handleRequest(req, res) {
       const lambdaDirMatch = url.match(new RegExp(`^${BASE_PATH}/aws/lambda/([^/]+)$`));
       if (lambdaDirMatch) {
         const name = lambdaDirMatch[1];
+        if (name.startsWith("._")) { res.writeHead(404); res.end(); return; }
         const files = await getLambdaFiles(name);
         const responses = [
           dirResponse(`${BASE_PATH}/aws/lambda/${name}/`, name),
@@ -383,6 +449,51 @@ async function handleRequest(req, res) {
           ...files.map(f => fileResponse(
             `${BASE_PATH}/aws/lambda/${name}/${f.name}`, f.name, f.size, null,
             f.name.endsWith(".js") ? "text/javascript" : "application/octet-stream"
+          )),
+        ];
+        res.writeHead(207, { "Content-Type": "application/xml; charset=utf-8" });
+        res.end(multistatus(responses));
+        return;
+      }
+
+      // ── Tube ──────────────────────────────────────────────────────────
+
+      // /fs/tube/
+      if (url === `${BASE_PATH}/tube`) {
+        // List app directories (share/, comments/, react/, etc.)
+        const apps = tubeListApps();
+        const responses = [
+          dirResponse(`${BASE_PATH}/tube/`, "tube"),
+          ...apps.map(a => dirResponse(`${BASE_PATH}/tube/${a}/`, a)),
+        ];
+        res.writeHead(207, { "Content-Type": "application/xml; charset=utf-8" });
+        res.end(multistatus(responses));
+        return;
+      }
+
+      // /fs/tube/<app>/
+      const tubeAppMatch = url.match(new RegExp(`^${BASE_PATH}/tube/([^/]+)$`));
+      if (tubeAppMatch) {
+        const app = tubeAppMatch[1];
+        const actions = tubeListActions(app);
+        const responses = [
+          dirResponse(`${BASE_PATH}/tube/${app}/`, app),
+          ...actions.map(a => dirResponse(`${BASE_PATH}/tube/${app}/${a}/`, a)),
+        ];
+        res.writeHead(207, { "Content-Type": "application/xml; charset=utf-8" });
+        res.end(multistatus(responses));
+        return;
+      }
+
+      // /fs/tube/<app>/<action>/
+      const tubeActionMatch = url.match(new RegExp(`^${BASE_PATH}/tube/([^/]+)/([^/]+)$`));
+      if (tubeActionMatch) {
+        const [, app, action] = tubeActionMatch;
+        const requests = tubeListRequests(app, action);
+        const responses = [
+          dirResponse(`${BASE_PATH}/tube/${app}/${action}/`, action),
+          ...requests.map(r => fileResponse(
+            `${BASE_PATH}/tube/${app}/${action}/${r.name}`, r.name, r.size, r.modified, r.type
           )),
         ];
         res.writeHead(207, { "Content-Type": "application/xml; charset=utf-8" });
@@ -600,6 +711,23 @@ async function handleRequest(req, res) {
         return text(res, content, "text/tab-separated-values");
       }
 
+      // ── Tube GET ────────────────────────────────────────────────────────
+
+      const tubeFileMatch = url.match(new RegExp(`^${BASE_PATH}/tube/([^/]+)/([^/]+)/(.+)$`));
+      if (tubeFileMatch) {
+        const [, app, action, filename] = tubeFileMatch;
+        const content = tubeReadFile(app, action, filename);
+        if (content === null) { res.writeHead(404); res.end(); return; }
+        const contentType = filename.endsWith(".json") ? "application/json" : "application/octet-stream";
+        res.writeHead(200, {
+          "Content-Type": contentType,
+          "Content-Length": Buffer.byteLength(content),
+        });
+        if (method === "GET") res.end(content);
+        else res.end();
+        return;
+      }
+
       // ── Content GET ──────────────────────────────────────────────────────
 
       const fileMatch = url.match(new RegExp(`^${BASE_PATH}/([^/]+)/([^/]+)/post\\.md$`));
@@ -615,6 +743,55 @@ async function handleRequest(req, res) {
 
       res.writeHead(404);
       res.end();
+      return;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // POST — the tube (local cat Lambda)
+    // ═══════════════════════════════════════════════════════════════════════
+    if (method === "POST") {
+      const rawUrl = req.url;
+      const urlPath = rawUrl.split("?")[0];
+      const tubeMatch = urlPath.match(new RegExp(`^${BASE_PATH}/tube/(.+)$`));
+      if (!tubeMatch) { res.writeHead(404); res.end(); return; }
+
+      const tubePath = tubeMatch[1]; // e.g. "share/add"
+      const parts = tubePath.split("/");
+      const app = parts[0];
+      const action = parts.slice(1).join("/") || "default";
+      const requestId = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+
+      // Collect body
+      const chunks = [];
+      req.on("data", chunk => chunks.push(chunk));
+      req.on("end", () => {
+        const body = Buffer.concat(chunks);
+        const queryString = rawUrl.includes("?") ? rawUrl.split("?")[1] : null;
+
+        const metadata = {
+          requestId,
+          path: tubePath,
+          method: "POST",
+          timestamp: new Date().toISOString(),
+          query: queryString ? Object.fromEntries(new URLSearchParams(queryString)) : null,
+          headers: {
+            "content-type": req.headers["content-type"],
+            "user-agent": req.headers["user-agent"],
+            "authorization": req.headers["authorization"] ? "[present]" : null,
+          },
+          bodySize: body.length,
+        };
+
+        tubeWriteRequest(app, action, requestId, metadata, body.length > 0 ? body : null);
+
+        const location = `${BASE_PATH}/tube/${app}/${action}/${requestId}.request`;
+        res.writeHead(202, {
+          "Content-Type": "application/json",
+          "Location": location,
+          "X-Request-Id": requestId,
+        });
+        res.end(JSON.stringify({ status: "Noted", requestId, location }));
+      });
       return;
     }
 
