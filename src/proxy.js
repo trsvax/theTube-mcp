@@ -13,9 +13,11 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import Database from "node:sqlite";
+import { DatabaseSync as Database } from "node:sqlite";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
+import { S3Client, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
 
 // Parse CLI args
 const { values } = parseArgs({
@@ -23,16 +25,23 @@ const { values } = parseArgs({
     server: { type: "string", default: "http://localhost:8080/fs" },
     db: { type: "string", default: resolve(import.meta.dirname, "../state.db") },
     token: { type: "string", default: "" },
+    logBucket: { type: "string", default: "thetube-today-logs" },
+    logPrefix: { type: "string", default: "cf/" },
+    distId: { type: "string", default: "E2DMNPNLN0VAQM" },
   },
 });
 
 const SERVER = values.server.replace(/\/$/, "");
 const TOKEN = values.token;
+const LOG_BUCKET = values.logBucket;
+const LOG_PREFIX = values.logPrefix;
+const DIST_ID = values.distId;
+const s3 = new S3Client({});
 
 // --- SQLite setup ---
 const dbPath = values.db;
 const db = new Database(dbPath);
-db.pragma("journal_mode = WAL");
+db.exec("PRAGMA journal_mode = WAL");
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS captures (
@@ -58,6 +67,10 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp INTEGER NOT NULL,
     summary TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS synced_logs (
+    key TEXT PRIMARY KEY,
+    synced_at INTEGER NOT NULL
   );
 `);
 
@@ -178,6 +191,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: "sync_captures",
+      description: "Read CloudFront logs from S3 for a given date, extract /w/share/ entries, and store them in local SQLite. Deduplicates by file+date. Returns the new captures found.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          date: { type: "string", description: "Date to sync (YYYY-MM-DD). Defaults to today." },
+        },
+      },
+    },
   ],
 }));
 
@@ -241,6 +264,87 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const limit = args?.limit || 10;
         const rows = db.prepare("SELECT * FROM sessions ORDER BY timestamp DESC LIMIT ?").all(limit);
         return { content: [{ type: "text", text: JSON.stringify(rows, null, 2) }] };
+      }
+
+      case "sync_captures": {
+        const date = args?.date || new Date().toISOString().slice(0, 10);
+        const prefix = `${LOG_PREFIX}${DIST_ID}.${date}-`;
+
+        // List all log files for this date
+        const listResp = await s3.send(new ListObjectsV2Command({
+          Bucket: LOG_BUCKET,
+          Prefix: prefix,
+          MaxKeys: 1000,
+        }));
+
+        const logFiles = listResp.Contents || [];
+        const captures = [];
+        let skipped = 0;
+
+        const checkSynced = db.prepare("SELECT key FROM synced_logs WHERE key = ?");
+        const markSynced = db.prepare("INSERT INTO synced_logs (key, synced_at) VALUES (?, ?)");
+        const insertCapture = db.prepare(
+          "INSERT INTO captures (file, type, date, caption, logged_at) VALUES (?, ?, ?, ?, ?)"
+        );
+        const checkCapture = db.prepare(
+          "SELECT id FROM captures WHERE file = ? AND date = ?"
+        );
+
+        for (const obj of logFiles) {
+          // Skip already-processed files
+          if (checkSynced.get(obj.Key)) {
+            skipped++;
+            continue;
+          }
+
+          const getResp = await s3.send(new GetObjectCommand({ Bucket: LOG_BUCKET, Key: obj.Key }));
+          const buf = Buffer.from(await getResp.Body.transformToByteArray());
+          const text = gunzipSync(buf).toString("utf-8");
+
+          for (const line of text.split("\n")) {
+            if (!line || line.startsWith("#")) continue;
+            const fields = line.split("\t");
+            const uri = fields[7];   // cs-uri-stem
+            const qs = fields[11];   // cs-uri-query
+            const status = fields[8]; // sc-status
+            const logDate = fields[0]; // date
+            const logTime = fields[1]; // time
+
+            if (uri?.startsWith("/w/share/") && status === "202" && qs && qs !== "-") {
+              const params = Object.fromEntries(
+                qs.split("&").map(p => {
+                  const [k, ...v] = p.split("=");
+                  return [decodeURIComponent(k), decodeURIComponent(v.join("=").replace(/\+/g, " "))];
+                })
+              );
+
+              if (params.file) {
+                captures.push({
+                  file: params.file,
+                  type: params.type || "unknown",
+                  date: params.date || logDate,
+                  caption: params.caption || null,
+                  logged_at: Math.floor(new Date(`${logDate}T${logTime}Z`).getTime() / 1000),
+                });
+              }
+            }
+          }
+
+          // Mark this log file as processed
+          markSynced.run(obj.Key, Math.floor(Date.now() / 1000));
+        }
+
+        // Insert new captures (deduplicate by file+date)
+        let added = 0;
+        for (const c of captures) {
+          if (!checkCapture.get(c.file, c.date)) {
+            insertCapture.run(c.file, c.type, c.date, c.caption, c.logged_at);
+            added++;
+          }
+        }
+
+        const summary = `Scanned ${logFiles.length - skipped} new log files (${skipped} already synced) for ${date}. Found ${captures.length} share entries, added ${added} new captures.`;
+        return { content: [{ type: "text", text: summary + "\n\n" + JSON.stringify(captures, null, 2) }] };
       }
 
       default:
