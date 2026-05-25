@@ -430,6 +430,7 @@ async function handleRequest(req, res) {
         const fns = await getLambdaFunctions();
         const responses = [
           dirResponse(`${BASE_PATH}/aws/lambda/`, "lambda"),
+          fileResponse(`${BASE_PATH}/aws/lambda/README.md`, "README.md", 0, null, "text/markdown"),
           ...fns.map(f => dirResponse(`${BASE_PATH}/aws/lambda/${f.FunctionName}/`, f.FunctionName)),
         ];
         res.writeHead(207, { "Content-Type": "application/xml; charset=utf-8" });
@@ -688,6 +689,24 @@ async function handleRequest(req, res) {
       }
 
       // ── AWS Lambda GET ───────────────────────────────────────────────────
+
+      // /fs/aws/lambda/README.md — generated from live config
+      if (url === `${BASE_PATH}/aws/lambda/README.md`) {
+        const fns = await getLambdaFunctions();
+        let md = `# Lambda Functions\n\n`;
+        md += `Functions matching \`thetube-*\`.\n\n`;
+        md += `| Function | Runtime | Memory | Timeout | Last Modified |\n`;
+        md += `|----------|---------|--------|---------|---------------|\n`;
+        for (const f of fns) {
+          md += `| \`${f.FunctionName}\` | ${f.Runtime} | ${f.MemorySize}MB | ${f.Timeout}s | ${f.LastModified?.split("T")[0] || "—"} |\n`;
+        }
+        md += `\n## Details\n\n`;
+        md += `Each function directory contains:\n`;
+        md += `- \`config.json\` — runtime, handler, memory, timeout, role\n`;
+        md += `- \`env.json\` — environment variables\n`;
+        md += `- Source files extracted from the deployment package\n`;
+        return text(res, md, "text/markdown");
+      }
 
       // /fs/aws/lambda/<name>/config.json
       const lambdaConfigMatch = url.match(new RegExp(`^${BASE_PATH}/aws/lambda/([^/]+)/config\\.json$`));
