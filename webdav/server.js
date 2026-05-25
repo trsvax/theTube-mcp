@@ -151,17 +151,25 @@ function tubeListActions(app) {
 function tubeListRequests(app, action) {
   const dir = path.join(TUBE_DIR, app, action);
   if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir, { withFileTypes: true })
-    .filter(f => f.isFile())
-    .map(f => {
-      const stat = fs.statSync(path.join(dir, f.name));
-      return {
-        name: f.name,
-        size: stat.size,
-        modified: stat.mtime.toUTCString(),
-        type: f.name.endsWith(".json") ? "application/json" : "application/octet-stream",
-      };
-    });
+  // Recurse into YYYY/MM/DD subdirectories
+  const files = [];
+  function walk(d, prefix) {
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        walk(path.join(d, entry.name), prefix ? `${prefix}/${entry.name}` : entry.name);
+      } else if (entry.isFile()) {
+        const stat = fs.statSync(path.join(d, entry.name));
+        files.push({
+          name: prefix ? `${prefix}/${entry.name}` : entry.name,
+          size: stat.size,
+          modified: stat.mtime.toUTCString(),
+          type: entry.name.endsWith(".json") || entry.name.endsWith(".request") ? "application/json" : "application/octet-stream",
+        });
+      }
+    }
+  }
+  walk(dir, "");
+  return files;
 }
 
 function tubeReadFile(app, action, filename) {
@@ -171,7 +179,12 @@ function tubeReadFile(app, action, filename) {
 }
 
 function tubeWriteRequest(app, action, requestId, metadata, body) {
-  const dir = ensureTubeDir(app, action);
+  // Write with YYYY/MM/DD date partition
+  const now = new Date();
+  const yyyy = now.getUTCFullYear();
+  const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(now.getUTCDate()).padStart(2, "0");
+  const dir = ensureTubeDir(app, action, String(yyyy), mm, dd);
   fs.writeFileSync(path.join(dir, `${requestId}.request`), JSON.stringify(metadata, null, 2));
   if (body && body.length > 0) {
     fs.writeFileSync(path.join(dir, `${requestId}.body`), body);
@@ -845,7 +858,11 @@ async function handleRequest(req, res) {
 
         tubeWriteRequest(app, action, requestId, metadata, body.length > 0 ? body : null);
 
-        const location = `${BASE_PATH}/tube/${app}/${action}/${requestId}.request`;
+        const now = new Date();
+        const yyyy = now.getUTCFullYear();
+        const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
+        const dd = String(now.getUTCDate()).padStart(2, "0");
+        const location = `${BASE_PATH}/tube/${app}/${action}/${yyyy}/${mm}/${dd}/${requestId}.request`;
         res.writeHead(202, {
           "Content-Type": "application/json",
           "Location": location,
