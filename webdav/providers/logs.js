@@ -21,16 +21,21 @@ export const CF_FIELDS = [
 
 export async function listLogDates() {
   return cached("log-dates", async () => {
-    const resp = await s3.send(new ListObjectsV2Command({
-      Bucket: LOG_BUCKET,
-      Prefix: LOG_PREFIX + DIST_ID,
-      MaxKeys: 1000,
-    }));
     const dates = new Set();
-    for (const obj of resp.Contents || []) {
-      const m = obj.Key.match(/\.(\d{4}-\d{2}-\d{2})-(\d{2})\./);
-      if (m) dates.add(m[1]);
-    }
+    let token;
+    do {
+      const resp = await s3.send(new ListObjectsV2Command({
+        Bucket: LOG_BUCKET,
+        Prefix: LOG_PREFIX + DIST_ID,
+        MaxKeys: 1000,
+        ContinuationToken: token,
+      }));
+      for (const obj of resp.Contents || []) {
+        const m = obj.Key.match(/\.(\d{4}-\d{2}-\d{2})-(\d{2})\./);
+        if (m) dates.add(m[1]);
+      }
+      token = resp.IsTruncated ? resp.NextContinuationToken : undefined;
+    } while (token);
     return [...dates].sort();
   });
 }
