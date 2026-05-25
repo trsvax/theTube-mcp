@@ -380,6 +380,7 @@ async function handleRequest(req, res) {
       if (url === `${BASE_PATH}/aws/cloudfront`) {
         const responses = [
           dirResponse(`${BASE_PATH}/aws/cloudfront/`, "cloudfront"),
+          fileResponse(`${BASE_PATH}/aws/cloudfront/README.md`, "README.md", 0, null, "text/markdown"),
           fileResponse(`${BASE_PATH}/aws/cloudfront/general.json`, "general.json"),
           dirResponse(`${BASE_PATH}/aws/cloudfront/origins/`, "origins"),
           dirResponse(`${BASE_PATH}/aws/cloudfront/behaviors/`, "behaviors"),
@@ -588,6 +589,43 @@ async function handleRequest(req, res) {
           certificate: config.ViewerCertificate?.ACMCertificateArn || null,
           sslMethod: config.ViewerCertificate?.SSLSupportMethod || null,
         });
+      }
+
+      // /fs/aws/cloudfront/README.md — generated from live config
+      if (url === `${BASE_PATH}/aws/cloudfront/README.md`) {
+        const config = await getDistConfig();
+        const behaviors = config.CacheBehaviors?.Items || [];
+        const defaultB = config.DefaultCacheBehavior;
+
+        let md = `# CloudFront: ${config.Comment || DIST_ID}\n\n`;
+        md += `Distribution \`${DIST_ID}\` — \`${(config.Aliases?.Items || []).join(", ")}\`\n\n`;
+        md += `## Behaviors\n\n`;
+        md += `| # | Path | Function | Methods |\n`;
+        md += `|---|------|----------|---------|\n`;
+
+        for (let i = 0; i < behaviors.length; i++) {
+          const b = behaviors[i];
+          const fn = (b.FunctionAssociations?.Items || []).map(f => f.FunctionARN.split("/").pop()).join(", ")
+            || (b.LambdaFunctionAssociations?.Items || []).map(l => l.LambdaFunctionARN.split(":function:").pop()).join(", ")
+            || "—";
+          md += `| ${i} | \`${b.PathPattern}\` | ${fn} | ${(b.AllowedMethods?.Items || []).join(", ")} |\n`;
+        }
+
+        const defaultFn = (defaultB.FunctionAssociations?.Items || []).map(f => f.FunctionARN.split("/").pop()).join(", ") || "—";
+        md += `| — | \`*\` (default) | ${defaultFn} | ${(defaultB.AllowedMethods?.Items || []).join(", ")} |\n`;
+
+        md += `\n## Logging\n\n`;
+        md += `- Bucket: \`${config.Logging?.Bucket || "disabled"}\`\n`;
+        md += `- Prefix: \`${config.Logging?.Prefix || ""}\`\n`;
+        md += `- Cookies: ${config.Logging?.IncludeCookies ? "yes" : "no"}\n`;
+
+        md += `\n## General\n\n`;
+        md += `- HTTP: ${config.HttpVersion}\n`;
+        md += `- IPv6: ${config.IsIPV6Enabled ? "yes" : "no"}\n`;
+        md += `- Price class: ${config.PriceClass}\n`;
+        md += `- SSL: ${config.ViewerCertificate?.SSLSupportMethod || "default"}\n`;
+
+        return text(res, md, "text/markdown");
       }
 
       if (url === `${BASE_PATH}/aws/cloudfront/error-pages.json`) {
