@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
  * MCP Proxy — translates MCP tool calls to WebDAV reads + SQLite state.
- * 
+ *
  * The WebDAV server is the filesystem. This proxy is a thin translation layer.
- * 
+ *
  * Usage:
  *   node src/proxy.js --server http://localhost:8080/fs
  */
@@ -17,13 +17,20 @@ import { DatabaseSync as Database } from "node:sqlite";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { S3Client, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  ListObjectsV2Command,
+  GetObjectCommand,
+} from "@aws-sdk/client-s3";
 
 // Parse CLI args
 const { values } = parseArgs({
   options: {
     server: { type: "string", default: "http://localhost:8080/fs" },
-    db: { type: "string", default: resolve(import.meta.dirname, "../state.db") },
+    db: {
+      type: "string",
+      default: resolve(import.meta.dirname, "../state.db"),
+    },
     token: { type: "string", default: "" },
     logBucket: { type: "string", default: "thetube-today-logs" },
     logPrefix: { type: "string", default: "cf/" },
@@ -79,7 +86,7 @@ async function webdavFetch(path, method = "GET") {
   const url = `${SERVER}${path}`;
   const headers = {};
   if (TOKEN) headers["Authorization"] = `Bearer ${TOKEN}`;
-  
+
   const res = await fetch(url, { method, headers });
   if (!res.ok) throw new Error(`${method} ${url} → ${res.status}`);
   return res.text();
@@ -87,13 +94,13 @@ async function webdavFetch(path, method = "GET") {
 
 async function propfind(path) {
   const url = `${SERVER}${path}`;
-  const headers = { "Depth": "1" };
+  const headers = { Depth: "1" };
   if (TOKEN) headers["Authorization"] = `Bearer ${TOKEN}`;
-  
+
   const res = await fetch(url, { method: "PROPFIND", headers });
   if (!res.ok) throw new Error(`PROPFIND ${url} → ${res.status}`);
   const xml = await res.text();
-  
+
   const entries = [];
   const responses = xml.split("<D:response>").slice(1);
   for (const r of responses) {
@@ -108,29 +115,39 @@ async function propfind(path) {
 // --- MCP Server ---
 const server = new Server(
   { name: "thetube-proxy", version: "0.3.0" },
-  { capabilities: { tools: {} } }
+  { capabilities: { tools: {} } },
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "list_directory",
-      description: "List contents of a virtual directory. The filesystem has: post types (journal/, post/, draft/), each containing post folders with post.md inside; and logs/ with dates containing hourly .tsv files.",
+      description:
+        "List contents of a virtual directory. The filesystem has: post types (journal/, post/, draft/), each containing post folders with post.md inside; and logs/ with dates containing hourly .tsv files.",
       inputSchema: {
         type: "object",
         properties: {
-          path: { type: "string", description: "Directory path (e.g. /, /journal, /logs, /logs/2026-05-23)" },
+          path: {
+            type: "string",
+            description:
+              "Directory path (e.g. /, /journal, /logs, /logs/2026-05-23)",
+          },
         },
         required: ["path"],
       },
     },
     {
       name: "read_file",
-      description: "Read a file from the virtual filesystem. Posts at /type/slug/post.md, logs at /logs/YYYY-MM-DD/HH.tsv (tab-separated CloudFront log entries).",
+      description:
+        "Read a file from the virtual filesystem. Posts at /type/slug/post.md, logs at /logs/YYYY-MM-DD/HH.tsv (tab-separated CloudFront log entries).",
       inputSchema: {
         type: "object",
         properties: {
-          path: { type: "string", description: "File path (e.g. /journal/the-share-system/post.md or /logs/2026-05-23/22.tsv)" },
+          path: {
+            type: "string",
+            description:
+              "File path (e.g. /journal/the-share-system/post.md or /logs/2026-05-23/22.tsv)",
+          },
         },
         required: ["path"],
       },
@@ -141,7 +158,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {
-          pending: { type: "boolean", description: "Only show unpublished captures" },
+          pending: {
+            type: "boolean",
+            description: "Only show unpublished captures",
+          },
           date: { type: "string", description: "Filter by date (YYYY-MM-DD)" },
         },
       },
@@ -166,7 +186,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {
-          active_only: { type: "boolean", description: "Only show non-revoked, non-expired tokens" },
+          active_only: {
+            type: "boolean",
+            description: "Only show non-revoked, non-expired tokens",
+          },
         },
       },
     },
@@ -187,17 +210,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {
-          limit: { type: "number", description: "Number of sessions to return (default 10)" },
+          limit: {
+            type: "number",
+            description: "Number of sessions to return (default 10)",
+          },
         },
       },
     },
     {
       name: "sync_captures",
-      description: "Read CloudFront logs from S3 for a given date, extract /w/share/ entries, and store them in local SQLite. Deduplicates by file+date. Returns the new captures found.",
+      description:
+        "Read CloudFront logs from S3 for a given date, extract /tube/share/ entries, and store them in local SQLite. Deduplicates by file+date. Returns the new captures found.",
       inputSchema: {
         type: "object",
         properties: {
-          date: { type: "string", description: "Date to sync (YYYY-MM-DD). Defaults to today." },
+          date: {
+            type: "string",
+            description: "Date to sync (YYYY-MM-DD). Defaults to today.",
+          },
         },
       },
     },
@@ -212,12 +242,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "list_directory": {
         const dirPath = args.path === "/" ? "/" : args.path.replace(/\/$/, "");
         const entries = await propfind(dirPath);
-        const contents = entries.slice(1).map(e => ({
+        const contents = entries.slice(1).map((e) => ({
           name: e.name,
           type: e.isDir ? "directory" : "file",
           href: e.href,
         }));
-        return { content: [{ type: "text", text: JSON.stringify(contents, null, 2) }] };
+        return {
+          content: [{ type: "text", text: JSON.stringify(contents, null, 2) }],
+        };
       }
 
       case "read_file": {
@@ -233,14 +265,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (conditions.length) sql += " WHERE " + conditions.join(" AND ");
         sql += " ORDER BY logged_at DESC LIMIT 50";
         const rows = db.prepare(sql).all();
-        return { content: [{ type: "text", text: JSON.stringify(rows, null, 2) }] };
+        return {
+          content: [{ type: "text", text: JSON.stringify(rows, null, 2) }],
+        };
       }
 
       case "add_capture": {
         const stmt = db.prepare(
-          "INSERT INTO captures (file, type, date, caption, logged_at) VALUES (?, ?, ?, ?, ?)"
+          "INSERT INTO captures (file, type, date, caption, logged_at) VALUES (?, ?, ?, ?, ?)",
         );
-        stmt.run(args.file, args.type, args.date, args.caption || null, Math.floor(Date.now() / 1000));
+        stmt.run(
+          args.file,
+          args.type,
+          args.date,
+          args.caption || null,
+          Math.floor(Date.now() / 1000),
+        );
         return { content: [{ type: "text", text: "Capture recorded." }] };
       }
 
@@ -251,19 +291,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sql += ` WHERE revoked = 0 AND (expires_at > ${now} OR expires_at = 0)`;
         }
         const rows = db.prepare(sql).all();
-        return { content: [{ type: "text", text: JSON.stringify(rows, null, 2) }] };
+        return {
+          content: [{ type: "text", text: JSON.stringify(rows, null, 2) }],
+        };
       }
 
       case "add_session_note": {
-        const stmt = db.prepare("INSERT INTO sessions (timestamp, summary) VALUES (?, ?)");
+        const stmt = db.prepare(
+          "INSERT INTO sessions (timestamp, summary) VALUES (?, ?)",
+        );
         stmt.run(Math.floor(Date.now() / 1000), args.summary);
         return { content: [{ type: "text", text: "Session note recorded." }] };
       }
 
       case "recent_sessions": {
         const limit = args?.limit || 10;
-        const rows = db.prepare("SELECT * FROM sessions ORDER BY timestamp DESC LIMIT ?").all(limit);
-        return { content: [{ type: "text", text: JSON.stringify(rows, null, 2) }] };
+        const rows = db
+          .prepare("SELECT * FROM sessions ORDER BY timestamp DESC LIMIT ?")
+          .all(limit);
+        return {
+          content: [{ type: "text", text: JSON.stringify(rows, null, 2) }],
+        };
       }
 
       case "sync_captures": {
@@ -271,23 +319,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const prefix = `${LOG_PREFIX}${DIST_ID}.${date}-`;
 
         // List all log files for this date
-        const listResp = await s3.send(new ListObjectsV2Command({
-          Bucket: LOG_BUCKET,
-          Prefix: prefix,
-          MaxKeys: 1000,
-        }));
+        const listResp = await s3.send(
+          new ListObjectsV2Command({
+            Bucket: LOG_BUCKET,
+            Prefix: prefix,
+            MaxKeys: 1000,
+          }),
+        );
 
         const logFiles = listResp.Contents || [];
         const captures = [];
         let skipped = 0;
 
-        const checkSynced = db.prepare("SELECT key FROM synced_logs WHERE key = ?");
-        const markSynced = db.prepare("INSERT INTO synced_logs (key, synced_at) VALUES (?, ?)");
+        const checkSynced = db.prepare(
+          "SELECT key FROM synced_logs WHERE key = ?",
+        );
+        const markSynced = db.prepare(
+          "INSERT INTO synced_logs (key, synced_at) VALUES (?, ?)",
+        );
         const insertCapture = db.prepare(
-          "INSERT INTO captures (file, type, date, caption, logged_at) VALUES (?, ?, ?, ?, ?)"
+          "INSERT INTO captures (file, type, date, caption, logged_at) VALUES (?, ?, ?, ?, ?)",
         );
         const checkCapture = db.prepare(
-          "SELECT id FROM captures WHERE file = ? AND date = ?"
+          "SELECT id FROM captures WHERE file = ? AND date = ?",
         );
 
         for (const obj of logFiles) {
@@ -297,25 +351,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             continue;
           }
 
-          const getResp = await s3.send(new GetObjectCommand({ Bucket: LOG_BUCKET, Key: obj.Key }));
+          const getResp = await s3.send(
+            new GetObjectCommand({ Bucket: LOG_BUCKET, Key: obj.Key }),
+          );
           const buf = Buffer.from(await getResp.Body.transformToByteArray());
           const text = gunzipSync(buf).toString("utf-8");
 
           for (const line of text.split("\n")) {
             if (!line || line.startsWith("#")) continue;
             const fields = line.split("\t");
-            const uri = fields[7];   // cs-uri-stem
-            const qs = fields[11];   // cs-uri-query
+            const uri = fields[7]; // cs-uri-stem
+            const qs = fields[11]; // cs-uri-query
             const status = fields[8]; // sc-status
             const logDate = fields[0]; // date
             const logTime = fields[1]; // time
 
-            if (uri?.startsWith("/w/share/") && status === "202" && qs && qs !== "-") {
+            if (
+              uri?.startsWith("/tube/share/") &&
+              status === "202" &&
+              qs &&
+              qs !== "-"
+            ) {
               const params = Object.fromEntries(
-                qs.split("&").map(p => {
+                qs.split("&").map((p) => {
                   const [k, ...v] = p.split("=");
-                  return [decodeURIComponent(k), decodeURIComponent(v.join("=").replace(/\+/g, " "))];
-                })
+                  return [
+                    decodeURIComponent(k),
+                    decodeURIComponent(v.join("=").replace(/\+/g, " ")),
+                  ];
+                }),
               );
 
               if (params.file) {
@@ -324,7 +388,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   type: params.type || "unknown",
                   date: params.date || logDate,
                   caption: params.caption || null,
-                  logged_at: Math.floor(new Date(`${logDate}T${logTime}Z`).getTime() / 1000),
+                  logged_at: Math.floor(
+                    new Date(`${logDate}T${logTime}Z`).getTime() / 1000,
+                  ),
                 });
               }
             }
@@ -344,14 +410,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const summary = `Scanned ${logFiles.length - skipped} new log files (${skipped} already synced) for ${date}. Found ${captures.length} share entries, added ${added} new captures.`;
-        return { content: [{ type: "text", text: summary + "\n\n" + JSON.stringify(captures, null, 2) }] };
+        return {
+          content: [
+            {
+              type: "text",
+              text: summary + "\n\n" + JSON.stringify(captures, null, 2),
+            },
+          ],
+        };
       }
 
       default:
-        return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
+        return {
+          content: [{ type: "text", text: `Unknown tool: ${name}` }],
+          isError: true,
+        };
     }
   } catch (error) {
-    return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
+    return {
+      content: [{ type: "text", text: `Error: ${error.message}` }],
+      isError: true,
+    };
   }
 });
 
