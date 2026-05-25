@@ -135,8 +135,10 @@ async function handleRequest(req, res) {
         const result = await provider.propfind(url, BASE_PATH, helpers);
         if (result.handled) {
           if (result.notFound) { res.writeHead(404); res.end(); return; }
+          // Some providers return an async fn for responses
+          const responses = result.async ? await result.fn() : result.responses;
           res.writeHead(207, { "Content-Type": "application/xml; charset=utf-8" });
-          res.end(multistatus(result.responses));
+          res.end(multistatus(responses));
           return;
         }
       }
