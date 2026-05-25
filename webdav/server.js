@@ -254,12 +254,16 @@ function parseZip(buf) {
 
 async function getLambdaFiles(name) {
   return cached(`lambda-files-${name}`, async () => {
-    const codeUrl = await getLambdaCodeUrl(name);
-    if (!codeUrl) return [];
-    const resp = await fetch(codeUrl);
-    if (!resp.ok) return [];
-    const buf = Buffer.from(await resp.arrayBuffer());
-    return parseZip(buf);
+    try {
+      const codeUrl = await getLambdaCodeUrl(name);
+      if (!codeUrl) return [];
+      const resp = await fetch(codeUrl);
+      if (!resp.ok) return [];
+      const buf = Buffer.from(await resp.arrayBuffer());
+      return parseZip(buf);
+    } catch {
+      return [];
+    }
   });
 }
 
@@ -442,7 +446,7 @@ async function handleRequest(req, res) {
       const lambdaDirMatch = url.match(new RegExp(`^${BASE_PATH}/aws/lambda/([^/]+)$`));
       if (lambdaDirMatch) {
         const name = lambdaDirMatch[1];
-        if (name.startsWith("._")) { res.writeHead(404); res.end(); return; }
+        if (name.startsWith("._") || name === "README.md") { res.writeHead(404); res.end(); return; }
         const files = await getLambdaFiles(name);
         const responses = [
           dirResponse(`${BASE_PATH}/aws/lambda/${name}/`, name),
