@@ -13,14 +13,18 @@ async function getLambdaFunctions() {
 
 async function getLambdaConfig(name) {
   return cached(`lambda-cfg-${name}`, async () => {
-    return lambda.send(new GetFunctionConfigurationCommand({ FunctionName: name }));
+    try {
+      return await lambda.send(new GetFunctionConfigurationCommand({ FunctionName: name }));
+    } catch { return {}; }
   });
 }
 
 async function getLambdaCodeUrl(name) {
   return cached(`lambda-code-${name}`, async () => {
-    const resp = await lambda.send(new GetFunctionCommand({ FunctionName: name }));
-    return resp.Code?.Location || null;
+    try {
+      const resp = await lambda.send(new GetFunctionCommand({ FunctionName: name }));
+      return resp.Code?.Location || null;
+    } catch { return null; }
   });
 }
 
