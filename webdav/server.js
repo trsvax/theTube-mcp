@@ -1,6 +1,6 @@
 import http from "node:http";
 
-// Providers
+// Providers — all route through tubeRequest for AWS access
 import * as content from "./providers/content.js";
 import * as logs from "./providers/logs.js";
 import * as tube from "./providers/tube.js";

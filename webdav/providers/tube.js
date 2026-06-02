@@ -1,17 +1,14 @@
+// tube provider — local filesystem + remote via tubeRequest
+// Local: direct fs reads/writes (the Mac is the tube's local half)
+// S3: routes through tubeRequest (no AWS credentials here)
+
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { S3Client, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
-import { cached } from "../cache.js";
+import { tubeRequest } from "../tubeRequest.js";
 
 // Local tube storage
 const TUBE_DIR = process.env.TUBE_DIR || path.join(process.env.HOME || "/tmp", ".tube");
-
-// S3 tube storage
-const TUBE_BUCKET = process.env.TUBE_BUCKET || "thetube-today";
-const TUBE_PREFIX = process.env.TUBE_PREFIX || "tube/";
-
-const s3 = new S3Client({});
 
 // --- Local helpers ---
 
@@ -77,60 +74,9 @@ function localWriteRequest(app, action, requestId, metadata, body) {
   }
 }
 
-// --- S3 helpers ---
-
-async function s3ListApps() {
-  return cached("tube-s3-apps", async () => {
-    try {
-      const resp = await s3.send(new ListObjectsV2Command({
-        Bucket: TUBE_BUCKET, Prefix: TUBE_PREFIX, Delimiter: "/", MaxKeys: 100,
-      }));
-      return (resp.CommonPrefixes || []).map(p => p.Prefix.replace(TUBE_PREFIX, "").replace(/\/$/, ""));
-    } catch { return []; }
-  });
-}
-
-async function s3ListActions(app) {
-  return cached(`tube-s3-actions-${app}`, async () => {
-    try {
-      const prefix = `${TUBE_PREFIX}${app}/`;
-      const resp = await s3.send(new ListObjectsV2Command({
-        Bucket: TUBE_BUCKET, Prefix: prefix, Delimiter: "/", MaxKeys: 100,
-      }));
-      return (resp.CommonPrefixes || []).map(p => p.Prefix.replace(prefix, "").replace(/\/$/, ""));
-    } catch { return []; }
-  });
-}
-
-async function s3ListFiles(app, action) {
-  return cached(`tube-s3-files-${app}-${action}`, async () => {
-    try {
-      const prefix = `${TUBE_PREFIX}${app}/${action}/`;
-      const resp = await s3.send(new ListObjectsV2Command({
-        Bucket: TUBE_BUCKET, Prefix: prefix, MaxKeys: 200,
-      }));
-      return (resp.Contents || []).map(obj => ({
-        name: obj.Key.replace(prefix, ""),
-        size: obj.Size,
-        modified: obj.LastModified?.toUTCString() || "",
-        type: obj.Key.endsWith(".json") ? "application/json" : "application/octet-stream",
-      }));
-    } catch { return []; }
-  });
-}
-
-async function s3ReadFile(app, action, filename) {
-  try {
-    const key = `${TUBE_PREFIX}${app}/${action}/${filename}`;
-    const resp = await s3.send(new GetObjectCommand({ Bucket: TUBE_BUCKET, Key: key }));
-    return await resp.Body.transformToString("utf-8");
-  } catch { return null; }
-}
-
 // --- PROPFIND ---
 
 export function propfind(url, basePath, { dirResponse, fileResponse }) {
-  // /fs/tube/
   if (url === `${basePath}/tube`) {
     const responses = [
       dirResponse(`${basePath}/tube/`, "tube"),
@@ -140,7 +86,6 @@ export function propfind(url, basePath, { dirResponse, fileResponse }) {
     return { handled: true, responses };
   }
 
-  // /fs/tube/local/
   if (url === `${basePath}/tube/local`) {
     const apps = localListApps();
     const responses = [
@@ -150,7 +95,6 @@ export function propfind(url, basePath, { dirResponse, fileResponse }) {
     return { handled: true, responses };
   }
 
-  // /fs/tube/local/<app>/
   const localAppMatch = url.match(new RegExp(`^${basePath}/tube/local/([^/]+)$`));
   if (localAppMatch) {
     const app = localAppMatch[1];
@@ -162,7 +106,6 @@ export function propfind(url, basePath, { dirResponse, fileResponse }) {
     return { handled: true, responses };
   }
 
-  // /fs/tube/local/<app>/<action>/
   const localActionMatch = url.match(new RegExp(`^${basePath}/tube/local/([^/]+)/([^/]+)$`));
   if (localActionMatch) {
     const [, app, action] = localActionMatch;
@@ -176,39 +119,37 @@ export function propfind(url, basePath, { dirResponse, fileResponse }) {
     return { handled: true, responses };
   }
 
-  // /fs/tube/s3/ — async, return a promise-like pattern
+  // S3 tube paths — via tubeRequest
   if (url === `${basePath}/tube/s3`) {
     return { handled: true, async: true, fn: async () => {
-      const apps = await s3ListApps();
+      const apps = await tubeRequest("aws/list-tube-apps");
       return [
         dirResponse(`${basePath}/tube/s3/`, "s3"),
-        ...apps.map(a => dirResponse(`${basePath}/tube/s3/${a}/`, a)),
+        ...(apps || []).map(a => dirResponse(`${basePath}/tube/s3/${a}/`, a)),
       ];
     }};
   }
 
-  // /fs/tube/s3/<app>/
   const s3AppMatch = url.match(new RegExp(`^${basePath}/tube/s3/([^/]+)$`));
   if (s3AppMatch) {
     const app = s3AppMatch[1];
     return { handled: true, async: true, fn: async () => {
-      const actions = await s3ListActions(app);
+      const actions = await tubeRequest("aws/list-tube-actions", { app });
       return [
         dirResponse(`${basePath}/tube/s3/${app}/`, app),
-        ...actions.map(a => dirResponse(`${basePath}/tube/s3/${app}/${a}/`, a)),
+        ...(actions || []).map(a => dirResponse(`${basePath}/tube/s3/${app}/${a}/`, a)),
       ];
     }};
   }
 
-  // /fs/tube/s3/<app>/<action>/
   const s3ActionMatch = url.match(new RegExp(`^${basePath}/tube/s3/([^/]+)/([^/]+)$`));
   if (s3ActionMatch) {
     const [, app, action] = s3ActionMatch;
     return { handled: true, async: true, fn: async () => {
-      const files = await s3ListFiles(app, action);
+      const files = await tubeRequest("aws/list-tube-files", { app, action });
       return [
         dirResponse(`${basePath}/tube/s3/${app}/${action}/`, action),
-        ...files.map(r => fileResponse(
+        ...(files || []).map(r => fileResponse(
           `${basePath}/tube/s3/${app}/${action}/${r.name}`, r.name, r.size, r.modified, r.type
         )),
       ];
@@ -221,7 +162,7 @@ export function propfind(url, basePath, { dirResponse, fileResponse }) {
 // --- GET ---
 
 export async function get(url, basePath) {
-  // /fs/tube/local/<app>/<action>/<file...>
+  // Local files
   const localFileMatch = url.match(new RegExp(`^${basePath}/tube/local/([^/]+)/([^/]+)/(.+)$`));
   if (localFileMatch) {
     const [, app, action, filename] = localFileMatch;
@@ -231,12 +172,13 @@ export async function get(url, basePath) {
     return { handled: true, content, contentType };
   }
 
-  // /fs/tube/s3/<app>/<action>/<file...>
+  // S3 files — via tubeRequest
   const s3FileMatch = url.match(new RegExp(`^${basePath}/tube/s3/([^/]+)/([^/]+)/(.+)$`));
   if (s3FileMatch) {
     const [, app, action, filename] = s3FileMatch;
-    const content = await s3ReadFile(app, action, filename);
-    if (content === null) return { handled: true, notFound: true };
+    const result = await tubeRequest("aws/read-tube-file", { app, action, filename });
+    if (!result) return { handled: true, notFound: true };
+    const content = typeof result === "string" ? result : result?.content || "";
     const contentType = filename.endsWith(".json") ? "application/json" : "application/octet-stream";
     return { handled: true, content, contentType };
   }
@@ -249,12 +191,10 @@ export async function get(url, basePath) {
 export function post(req, url, basePath) {
   const rawUrl = req.url;
   const urlPath = rawUrl.split("?")[0];
-  // POST /fs/tube/<app>/<action> — writes to local
   const tubeMatch = urlPath.match(new RegExp(`^${basePath}/tube/(?:local/)?(.+)$`));
   if (!tubeMatch) return { handled: false };
 
   const tubePath = tubeMatch[1];
-  // Don't allow POST to s3/ path
   if (tubePath.startsWith("s3/")) return { handled: false };
 
   const parts = tubePath.split("/");

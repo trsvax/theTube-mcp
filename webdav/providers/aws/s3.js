@@ -1,23 +1,11 @@
-// S3 buckets provider — shows thetube buckets and top-level prefixes
-import { S3Client, ListObjectsV2Command } from "@aws-sdk/client-s3";
-import { cached } from "../../cache.js";
+// S3 provider — routes through the tube
+// No AWS credentials. Just tubeRequest.
+
+import { tubeRequest } from "../../tubeRequest.js";
 
 const S3_BUCKETS = (process.env.S3_BUCKETS || "thetube-today,thetube-today-logs").split(",");
-const s3 = new S3Client({});
-
-async function listPrefixes(bucket, prefix = "") {
-  return cached(`s3-prefixes-${bucket}-${prefix}`, async () => {
-    try {
-      const resp = await s3.send(new ListObjectsV2Command({
-        Bucket: bucket, Prefix: prefix, Delimiter: "/", MaxKeys: 100,
-      }));
-      return (resp.CommonPrefixes || []).map(p => p.Prefix.replace(prefix, "").replace(/\/$/, ""));
-    } catch { return []; }
-  });
-}
 
 export async function propfind(url, basePath, { dirResponse, fileResponse }) {
-  // /fs/aws/s3/
   if (url === `${basePath}/aws/s3`) {
     const responses = [
       dirResponse(`${basePath}/aws/s3/`, "s3"),
@@ -27,41 +15,31 @@ export async function propfind(url, basePath, { dirResponse, fileResponse }) {
     return { handled: true, responses };
   }
 
-  // /fs/aws/s3/<bucket>/
   const bucketMatch = url.match(new RegExp(`^${basePath}/aws/s3/([^/]+)$`));
   if (bucketMatch) {
     const bucket = bucketMatch[1];
     if (!S3_BUCKETS.includes(bucket)) return { handled: false };
     return { handled: true, async: true, fn: async () => {
-      const prefixes = await listPrefixes(bucket);
+      const prefixes = await tubeRequest("aws/list-s3-prefixes", { bucket, prefix: "" });
       return [
         dirResponse(`${basePath}/aws/s3/${bucket}/`, bucket),
-        ...prefixes.map(p => dirResponse(`${basePath}/aws/s3/${bucket}/${p}/`, p)),
+        ...(prefixes || []).map(p => dirResponse(`${basePath}/aws/s3/${bucket}/${p}/`, p)),
       ];
     }};
   }
 
-  // /fs/aws/s3/<bucket>/<prefix>/
   const prefixMatch = url.match(new RegExp(`^${basePath}/aws/s3/([^/]+)/(.+)$`));
   if (prefixMatch) {
     const [, bucket, subpath] = prefixMatch;
     if (!S3_BUCKETS.includes(bucket)) return { handled: false };
     const prefix = subpath + "/";
     return { handled: true, async: true, fn: async () => {
-      const prefixes = await listPrefixes(bucket, prefix);
-      const resp = await s3.send(new ListObjectsV2Command({
-        Bucket: bucket, Prefix: prefix, Delimiter: "/", MaxKeys: 100,
-      }));
-      const files = (resp.Contents || [])
-        .filter(obj => obj.Key !== prefix)
-        .map(obj => ({
-          name: obj.Key.replace(prefix, ""),
-          size: obj.Size,
-          modified: obj.LastModified?.toUTCString() || "",
-        }));
+      const result = await tubeRequest("aws/list-s3-contents", { bucket, prefix });
+      const dirs = result?.prefixes || [];
+      const files = result?.files || [];
       return [
         dirResponse(`${basePath}/aws/s3/${bucket}/${subpath}/`, subpath.split("/").pop()),
-        ...prefixes.map(p => dirResponse(`${basePath}/aws/s3/${bucket}/${subpath}/${p}/`, p)),
+        ...dirs.map(p => dirResponse(`${basePath}/aws/s3/${bucket}/${subpath}/${p}/`, p)),
         ...files.map(f => fileResponse(
           `${basePath}/aws/s3/${bucket}/${subpath}/${f.name}`, f.name, f.size, f.modified, "application/octet-stream"
         )),
@@ -73,7 +51,6 @@ export async function propfind(url, basePath, { dirResponse, fileResponse }) {
 }
 
 export async function get(url, basePath) {
-  // /fs/aws/s3/README.md
   if (url === `${basePath}/aws/s3/README.md`) {
     let md = `# S3 Buckets\n\n`;
     md += `| Bucket | Purpose |\n`;

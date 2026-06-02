@@ -1,38 +1,23 @@
-// Cognito user pool provider
-import { CognitoIdentityProviderClient, DescribeUserPoolCommand, ListUserPoolClientsCommand, DescribeUserPoolClientCommand, ListGroupsCommand } from "@aws-sdk/client-cognito-identity-provider";
-import { cached } from "../../cache.js";
+// Cognito provider — routes through the tube
+// No AWS credentials. Just tubeRequest.
+
+import { tubeRequest } from "../../tubeRequest.js";
 
 const COGNITO_POOL_ID = process.env.COGNITO_POOL_ID || "us-east-1_YJXzLNxyi";
-const cognito = new CognitoIdentityProviderClient({});
 
 async function getPool() {
-  return cached("cognito-pool", async () => {
-    const resp = await cognito.send(new DescribeUserPoolCommand({ UserPoolId: COGNITO_POOL_ID }));
-    return resp.UserPool;
-  });
+  return tubeRequest("aws/describe-cognito-pool", { poolId: COGNITO_POOL_ID });
 }
 
 async function getClients() {
-  return cached("cognito-clients", async () => {
-    const resp = await cognito.send(new ListUserPoolClientsCommand({ UserPoolId: COGNITO_POOL_ID, MaxResults: 10 }));
-    const clients = [];
-    for (const c of resp.UserPoolClients || []) {
-      const detail = await cognito.send(new DescribeUserPoolClientCommand({ UserPoolId: COGNITO_POOL_ID, ClientId: c.ClientId }));
-      clients.push(detail.UserPoolClient);
-    }
-    return clients;
-  });
+  return tubeRequest("aws/list-cognito-clients", { poolId: COGNITO_POOL_ID });
 }
 
 async function getGroups() {
-  return cached("cognito-groups", async () => {
-    const resp = await cognito.send(new ListGroupsCommand({ UserPoolId: COGNITO_POOL_ID }));
-    return resp.Groups || [];
-  });
+  return tubeRequest("aws/list-cognito-groups", { poolId: COGNITO_POOL_ID });
 }
 
 export async function propfind(url, basePath, { dirResponse, fileResponse }) {
-  // /fs/aws/cognito/
   if (url === `${basePath}/aws/cognito`) {
     const responses = [
       dirResponse(`${basePath}/aws/cognito/`, "cognito"),
@@ -44,26 +29,24 @@ export async function propfind(url, basePath, { dirResponse, fileResponse }) {
     return { handled: true, responses };
   }
 
-  // /fs/aws/cognito/clients/
   if (url === `${basePath}/aws/cognito/clients`) {
     return { handled: true, async: true, fn: async () => {
       const clients = await getClients();
       return [
         dirResponse(`${basePath}/aws/cognito/clients/`, "clients"),
-        ...clients.map(c => fileResponse(
+        ...(clients || []).map(c => fileResponse(
           `${basePath}/aws/cognito/clients/${c.ClientName}.json`, `${c.ClientName}.json`
         )),
       ];
     }};
   }
 
-  // /fs/aws/cognito/groups/
   if (url === `${basePath}/aws/cognito/groups`) {
     return { handled: true, async: true, fn: async () => {
       const groups = await getGroups();
       return [
         dirResponse(`${basePath}/aws/cognito/groups/`, "groups"),
-        ...groups.map(g => fileResponse(
+        ...(groups || []).map(g => fileResponse(
           `${basePath}/aws/cognito/groups/${g.GroupName}.json`, `${g.GroupName}.json`
         )),
       ];
@@ -74,7 +57,6 @@ export async function propfind(url, basePath, { dirResponse, fileResponse }) {
 }
 
 export async function get(url, basePath) {
-  // /fs/aws/cognito/README.md
   if (url === `${basePath}/aws/cognito/README.md`) {
     const pool = await getPool();
     const clients = await getClients();
@@ -84,15 +66,15 @@ export async function get(url, basePath) {
     md += `Pool ID: \`${COGNITO_POOL_ID}\`\n`;
     md += `Domain: \`${pool.Domain}.auth.${pool.Id.split("_")[0]}.amazoncognito.com\`\n`;
     md += `Status: ${pool.Status}\n`;
-    md += `Created: ${pool.CreationDate?.toISOString().split("T")[0]}\n\n`;
+    md += `Created: ${pool.CreationDate?.split("T")[0] || "—"}\n\n`;
 
-    md += `## Clients (${clients.length})\n\n`;
-    for (const c of clients) {
+    md += `## Clients (${(clients || []).length})\n\n`;
+    for (const c of clients || []) {
       md += `- \`${c.ClientName}\` — ${c.ClientId}\n`;
     }
 
-    md += `\n## Groups (${groups.length})\n\n`;
-    for (const g of groups) {
+    md += `\n## Groups (${(groups || []).length})\n\n`;
+    for (const g of groups || []) {
       md += `- \`${g.GroupName}\`${g.Description ? ` — ${g.Description}` : ""}\n`;
     }
 
@@ -106,7 +88,6 @@ export async function get(url, basePath) {
     return { handled: true, content: md, contentType: "text/markdown" };
   }
 
-  // /fs/aws/cognito/pool.json
   if (url === `${basePath}/aws/cognito/pool.json`) {
     const pool = await getPool();
     const content = {
@@ -114,8 +95,8 @@ export async function get(url, basePath) {
       name: pool.Name,
       status: pool.Status,
       domain: pool.Domain,
-      created: pool.CreationDate?.toISOString(),
-      lastModified: pool.LastModifiedDate?.toISOString(),
+      created: pool.CreationDate,
+      lastModified: pool.LastModifiedDate,
       estimatedUsers: pool.EstimatedNumberOfUsers,
       mfaConfig: pool.MfaConfiguration,
       policies: pool.Policies,
@@ -125,12 +106,11 @@ export async function get(url, basePath) {
     return { handled: true, content: JSON.stringify(content, null, 2), contentType: "application/json" };
   }
 
-  // /fs/aws/cognito/clients/<name>.json
   const clientMatch = url.match(new RegExp(`^${basePath}/aws/cognito/clients/([^/]+)\\.json$`));
   if (clientMatch) {
     const name = decodeURIComponent(clientMatch[1]);
     const clients = await getClients();
-    const client = clients.find(c => c.ClientName === name);
+    const client = (clients || []).find(c => c.ClientName === name);
     if (!client) return { handled: true, notFound: true };
     const content = {
       clientId: client.ClientId,
@@ -149,20 +129,19 @@ export async function get(url, basePath) {
     return { handled: true, content: JSON.stringify(content, null, 2), contentType: "application/json" };
   }
 
-  // /fs/aws/cognito/groups/<name>.json
   const groupMatch = url.match(new RegExp(`^${basePath}/aws/cognito/groups/([^/]+)\\.json$`));
   if (groupMatch) {
     const name = decodeURIComponent(groupMatch[1]);
     const groups = await getGroups();
-    const group = groups.find(g => g.GroupName === name);
+    const group = (groups || []).find(g => g.GroupName === name);
     if (!group) return { handled: true, notFound: true };
     const content = {
       name: group.GroupName,
       description: group.Description,
       precedence: group.Precedence,
       roleArn: group.RoleArn,
-      created: group.CreationDate?.toISOString(),
-      lastModified: group.LastModifiedDate?.toISOString(),
+      created: group.CreationDate,
+      lastModified: group.LastModifiedDate,
     };
     return { handled: true, content: JSON.stringify(content, null, 2), contentType: "application/json" };
   }

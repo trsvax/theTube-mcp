@@ -1,15 +1,20 @@
-import { CloudFrontClient, GetDistributionConfigCommand } from "@aws-sdk/client-cloudfront";
-import { cached } from "../../cache.js";
+// cloudfront provider — routes through the tube
+// No AWS credentials. Just tubeRequest.
+
+import { tubeRequest } from "../../tubeRequest.js";
 
 const DIST_ID = process.env.DIST_ID || "E2DMNPNLN0VAQM";
 
-const cf = new CloudFrontClient({});
+let _configCache = null;
+let _configTs = 0;
+const CACHE_TTL = 60_000;
 
 async function getDistConfig() {
-  return cached("cf-config", async () => {
-    const resp = await cf.send(new GetDistributionConfigCommand({ Id: DIST_ID }));
-    return resp.DistributionConfig;
-  });
+  if (_configCache && Date.now() - _configTs < CACHE_TTL) return _configCache;
+  const config = await tubeRequest("aws/describe-cloudfront", { distributionId: DIST_ID });
+  _configCache = config;
+  _configTs = Date.now();
+  return config;
 }
 
 function formatBehavior(b, pathPattern) {
@@ -34,7 +39,6 @@ function formatBehavior(b, pathPattern) {
 }
 
 export async function propfind(url, basePath, { dirResponse, fileResponse }) {
-  // /fs/aws/cloudfront/
   if (url === `${basePath}/aws/cloudfront`) {
     const responses = [
       dirResponse(`${basePath}/aws/cloudfront/`, "cloudfront"),
@@ -49,7 +53,6 @@ export async function propfind(url, basePath, { dirResponse, fileResponse }) {
     return { handled: true, responses };
   }
 
-  // /fs/aws/cloudfront/origins/
   if (url === `${basePath}/aws/cloudfront/origins`) {
     const config = await getDistConfig();
     const origins = config.Origins?.Items || [];
@@ -62,7 +65,6 @@ export async function propfind(url, basePath, { dirResponse, fileResponse }) {
     return { handled: true, responses };
   }
 
-  // /fs/aws/cloudfront/behaviors/
   if (url === `${basePath}/aws/cloudfront/behaviors`) {
     const config = await getDistConfig();
     const behaviors = config.CacheBehaviors?.Items || [];
@@ -81,7 +83,6 @@ export async function propfind(url, basePath, { dirResponse, fileResponse }) {
 }
 
 export async function get(url, basePath) {
-  // /fs/aws/cloudfront/general.json
   if (url === `${basePath}/aws/cloudfront/general.json`) {
     const config = await getDistConfig();
     const content = {
@@ -99,7 +100,6 @@ export async function get(url, basePath) {
     return { handled: true, content: JSON.stringify(content, null, 2), contentType: "application/json" };
   }
 
-  // /fs/aws/cloudfront/README.md
   if (url === `${basePath}/aws/cloudfront/README.md`) {
     const config = await getDistConfig();
     const behaviors = config.CacheBehaviors?.Items || [];
@@ -136,7 +136,6 @@ export async function get(url, basePath) {
     return { handled: true, content: md, contentType: "text/markdown" };
   }
 
-  // /fs/aws/cloudfront/error-pages.json
   if (url === `${basePath}/aws/cloudfront/error-pages.json`) {
     const config = await getDistConfig();
     const pages = (config.CustomErrorResponses?.Items || []).map(e => ({
@@ -148,7 +147,6 @@ export async function get(url, basePath) {
     return { handled: true, content: JSON.stringify(pages, null, 2), contentType: "application/json" };
   }
 
-  // /fs/aws/cloudfront/logging.json
   if (url === `${basePath}/aws/cloudfront/logging.json`) {
     const config = await getDistConfig();
     const content = {
@@ -160,12 +158,10 @@ export async function get(url, basePath) {
     return { handled: true, content: JSON.stringify(content, null, 2), contentType: "application/json" };
   }
 
-  // /fs/aws/cloudfront/tags.json
   if (url === `${basePath}/aws/cloudfront/tags.json`) {
     return { handled: true, content: JSON.stringify({}, null, 2), contentType: "application/json" };
   }
 
-  // /fs/aws/cloudfront/origins/<id>.json
   const originMatch = url.match(new RegExp(`^${basePath}/aws/cloudfront/origins/([^/]+)\\.json$`));
   if (originMatch) {
     const id = originMatch[1];
@@ -183,14 +179,12 @@ export async function get(url, basePath) {
     return { handled: true, content: JSON.stringify(content, null, 2), contentType: "application/json" };
   }
 
-  // /fs/aws/cloudfront/behaviors/default.json
   if (url === `${basePath}/aws/cloudfront/behaviors/default.json`) {
     const config = await getDistConfig();
     const b = config.DefaultCacheBehavior;
     return { handled: true, content: JSON.stringify(formatBehavior(b, "*"), null, 2), contentType: "application/json" };
   }
 
-  // /fs/aws/cloudfront/behaviors/<n>-<name>.json
   const behaviorMatch = url.match(new RegExp(`^${basePath}/aws/cloudfront/behaviors/(\\d+)-([^/]+)\\.json$`));
   if (behaviorMatch) {
     const idx = parseInt(behaviorMatch[1]);
