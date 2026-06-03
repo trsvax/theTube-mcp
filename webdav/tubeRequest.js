@@ -7,9 +7,11 @@ import crypto from "node:crypto";
 
 /**
  * @typedef {object} TubeReceipt
- * @property {string} status
- * @property {string} requestId
- * @property {string} location
+ * @property {string} status — "Noted" (async) or "OK" (sync)
+ * @property {string} requestId — locker ID (Lambda request ID)
+ * @property {string} [location] — presigned GET for result/status.json
+ * @property {string} [prefix] — S3 prefix of the locker
+ * @property {{ url: string, fields: Record<string, string> }} [write] — presigned POST for uploads
  */
 
 /**
@@ -22,7 +24,6 @@ import crypto from "node:crypto";
 const TUBE_URL = process.env.TUBE_URL || "https://thetube.today/tube";
 const POLL_INTERVAL = process.env.POLL_INTERVAL ? parseInt(process.env.POLL_INTERVAL) : 200;
 const POLL_TIMEOUT = process.env.POLL_TIMEOUT ? parseInt(process.env.POLL_TIMEOUT) : 10_000;
-const FS_URL = process.env.FS_URL || "https://thetube.today/fs";
 
 // Auth — loaded once from Keychain or env
 /** @type {string | null} */
@@ -101,29 +102,31 @@ export async function tubeRequest(path, params = {}, opts = {}) {
     body,
   });
 
-  // 200 = cached result (idempotent hit)
+  // 200 = sync result (processor response, passed through by ticket machine)
   if (response.status === 200) {
     return response.json();
   }
 
   // 202 = accepted, poll for result
   if (response.status === 202) {
-    /** @type {TubeReceipt} */
     const receipt = await response.json();
-    const { requestId, location } = receipt;
+    const requestId = receipt.locker || receipt.requestId;
 
-    if (!shouldPoll) return receipt;
+    if (!shouldPoll) return /** @type {TubeReceipt} */ ({ status: receipt.status, requestId, location: receipt.result });
 
-    // Poll the result location
-    const resultUrl = `${FS_URL}${location.replace(/^\/fs/, "").replace(".json", ".result")}`;
+    // Poll the presigned result URL from the ticket machine
+    const resultUrl = receipt.result;
+    if (!resultUrl) {
+      throw new TubeError(`tubeRequest: 202 but no result URL in response`, requestId);
+    }
+
     const deadline = Date.now() + timeout;
 
     while (Date.now() < deadline) {
       await sleep(POLL_INTERVAL);
 
-      const check = await fetch(resultUrl, {
-        headers: { "Authorization": `Bearer ${_token}` },
-      });
+      // Result URL is presigned — no auth headers needed
+      const check = await fetch(resultUrl);
 
       if (check.status === 200) {
         const contentType = check.headers.get("content-type") || "";
@@ -131,8 +134,8 @@ export async function tubeRequest(path, params = {}, opts = {}) {
         return { content: await check.text(), contentType };
       }
 
-      // 404 = not ready yet, keep polling
-      if (check.status !== 404) {
+      // 403 or 404 = not ready yet (S3 returns 403 for missing keys with presigned URLs)
+      if (check.status !== 404 && check.status !== 403) {
         throw new TubeError(`tubeRequest: unexpected status ${check.status} polling ${resultUrl}`, requestId);
       }
     }
@@ -158,6 +161,86 @@ export async function tubeRequest(path, params = {}, opts = {}) {
  * @returns {Promise<TubeReceipt>}
  */
 tubeRequest.fire = (path, params = {}) => /** @type {Promise<TubeReceipt>} */ (tubeRequest(path, params, { poll: false }));
+
+/**
+ * Upload files through the tube. One ticket, N files.
+ * Gets a ticket (presigned POST), uploads each file, polls for result.
+ *
+ * @param {string} path — tube path (e.g. "share/add")
+ * @param {Array<{ name: string, data: Buffer, contentType?: string }>} files
+ * @param {Record<string, unknown>} [params] — metadata for the ticket request
+ * @param {TubeRequestOptions} [opts]
+ * @returns {Promise<unknown>} — processor result
+ */
+tubeRequest.upload = async (path, files, params = {}, opts = {}) => {
+  const timeout = opts.timeout ?? POLL_TIMEOUT;
+
+  // Get a ticket
+  const receipt = /** @type {TubeReceipt} */ (await tubeRequest(path, {
+    ...params,
+    count: files.length,
+    file: files[0]?.name || "upload",
+  }, { poll: false }));
+
+  if (!receipt.write) {
+    throw new TubeError("tubeRequest.upload: no write URL in receipt", receipt.requestId);
+  }
+
+  const { url: postUrl, fields } = receipt.write;
+
+  // Upload each file using presigned POST (multipart form)
+  let uploaded = 0;
+  for (const file of files) {
+    const boundary = `----TubeUpload${Date.now()}${Math.random().toString(36).slice(2)}`;
+    const parts = [];
+
+    // Policy fields first
+    for (const [k, v] of Object.entries(fields)) {
+      const value = k === "key" ? v.replace("${filename}", file.name) : v;
+      parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${value}`);
+    }
+    parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="Content-Type"\r\n\r\n${file.contentType || "application/octet-stream"}`);
+
+    // File field last
+    const fileHeader = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.name}"\r\nContent-Type: ${file.contentType || "application/octet-stream"}\r\n\r\n`;
+    const fileFooter = `\r\n--${boundary}--\r\n`;
+
+    const bodyParts = Buffer.concat([
+      Buffer.from(parts.join("\r\n") + "\r\n"),
+      Buffer.from(fileHeader),
+      file.data,
+      Buffer.from(fileFooter),
+    ]);
+
+    const uploadResponse = await fetch(postUrl, {
+      method: "POST",
+      headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+      body: bodyParts,
+    });
+
+    if (uploadResponse.ok) uploaded++;
+  }
+
+  if (uploaded === 0) {
+    throw new TubeError("tubeRequest.upload: all uploads failed", receipt.requestId);
+  }
+
+  // Poll for result
+  if (opts.poll === false) return { uploaded, total: files.length, resultUrl: receipt.location };
+
+  const resultUrl = receipt.location;
+  if (!resultUrl) return { uploaded, total: files.length };
+
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    await sleep(POLL_INTERVAL);
+    const check = await fetch(resultUrl);
+    if (check.status === 200) return check.json();
+    if (check.status !== 404 && check.status !== 403) break;
+  }
+
+  return { pending: true, uploaded, total: files.length, resultUrl };
+};
 
 // --- Error class ---
 
