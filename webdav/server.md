@@ -1,6 +1,33 @@
+---
+title: The WebDAV Server
+date: 2026-06-04
+tags: [tech, src]
+type: journal
+audience: owner
+status: journaling
+coffee: 1
+summary: Mount the tube as a filesystem. PROPFIND lists, GET reads, POST writes. Providers route through tubeRequest — no AWS credentials here.
+workflow: draft
+deploy:
+  type: module
+  name: server.js
+  target: webdav/server.js
+  code: js
+---
+
+## Mount the tube
+
+A WebDAV server on localhost. Mount it and browse AWS, logs, content, the tube itself — all as folders and files. Finder reads it. `ls` reads it. The MCP server reads it.
+
+```
+mkdir -p /tmp/tube && mount -t webdav http://localhost:8080/fs/ /tmp/tube
+```
+
+No AWS credentials in this process. Every AWS read routes through `tubeRequest()` → ticket machine → processor. The server is just a URL→path router that speaks WebDAV XML.
+
+```js # src
 import http from "node:http";
 
-// Providers — all route through tubeRequest for AWS access
 import * as content from "./providers/content.js";
 import * as logs from "./providers/logs.js";
 import * as tube from "./providers/tube.js";
@@ -10,12 +37,15 @@ import * as s3Provider from "./providers/aws/s3.js";
 import * as cognitoProvider from "./providers/aws/cognito.js";
 import * as iamProvider from "./providers/aws/iam.js";
 
-// Config
 const PORT = process.env.PORT || 8080;
 const BASE_PATH = "/fs";
+```
 
-// --- WebDAV XML helpers ---
+## WebDAV XML
 
+The protocol is verbose but mechanical. Directories are `<D:collection/>`, files have content-length and type. Every response is a `multistatus` wrapper around individual `response` elements.
+
+```js # src
 function multistatus(responses) {
   return `<?xml version="1.0" encoding="utf-8"?>
 <D:multistatus xmlns:D="DAV:">
@@ -53,22 +83,21 @@ function fileResponse(href, displayname, size, modified, contentType) {
   </D:response>`;
 }
 
-function json(res, obj) {
-  const c = JSON.stringify(obj, null, 2);
-  res.writeHead(200, { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(c) });
-  res.end(c);
-}
-
 function text(res, content, type) {
   res.writeHead(200, { "Content-Type": type, "Content-Length": Buffer.byteLength(content) });
   res.end(content);
 }
 
-// Helpers object passed to providers
 const helpers = { dirResponse, fileResponse };
+```
 
-// --- Route handler ---
+## Request handler
 
+Three verbs: PROPFIND (list), GET (read), POST (write to tube). Each verb iterates through providers in order until one claims the URL. First match wins.
+
+The root PROPFIND builds the top-level listing: content types from posts, plus logs, aws, and tube directories.
+
+```js # src
 async function handleRequest(req, res) {
   const url = decodeURIComponent(req.url).replace(/\/$/, "") || BASE_PATH;
   const method = req.method.toUpperCase();
@@ -82,19 +111,16 @@ async function handleRequest(req, res) {
   }
 
   try {
-    // Ignore macOS resource fork requests
+    // macOS resource fork noise
     if (url.includes("/._")) {
       res.writeHead(404);
       res.end();
       return;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // PROPFIND
-    // ═══════════════════════════════════════════════════════════════════════
+    // PROPFIND — directory listings
     if (method === "PROPFIND") {
 
-      // Root: /fs/
       if (url === BASE_PATH || url === `${BASE_PATH}/`) {
         const posts = content.getPosts();
         const types = content.getTypes(posts);
@@ -110,7 +136,6 @@ async function handleRequest(req, res) {
         return;
       }
 
-      // /fs/aws/ — list AWS sub-providers
       if (url === `${BASE_PATH}/aws`) {
         const responses = [
           dirResponse(`${BASE_PATH}/aws/`, "aws"),
@@ -125,7 +150,6 @@ async function handleRequest(req, res) {
         return;
       }
 
-      // Route to providers in order
       const propfindProviders = [
         cloudfront, lambdaProvider, s3Provider, cognitoProvider, iamProvider,
         tube, logs, content,
@@ -135,7 +159,6 @@ async function handleRequest(req, res) {
         const result = await provider.propfind(url, BASE_PATH, helpers);
         if (result.handled) {
           if (result.notFound) { res.writeHead(404); res.end(); return; }
-          // Some providers return an async fn for responses
           const responses = result.async ? await result.fn() : result.responses;
           res.writeHead(207, { "Content-Type": "application/xml; charset=utf-8" });
           res.end(multistatus(responses));
@@ -148,9 +171,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // GET / HEAD
-    // ═══════════════════════════════════════════════════════════════════════
+    // GET / HEAD — file content
     if (method === "GET" || method === "HEAD") {
 
       const getProviders = [
@@ -162,7 +183,6 @@ async function handleRequest(req, res) {
         const result = await provider.get(url, BASE_PATH);
         if (result.handled) {
           if (result.notFound) { res.writeHead(404); res.end(); return; }
-          // Binary content (Buffer) — write directly
           if (result.binary) {
             res.writeHead(200, {
               "Content-Type": result.contentType,
@@ -189,9 +209,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // POST — the tube (local cat Lambda)
-    // ═══════════════════════════════════════════════════════════════════════
+    // POST — write to tube
     if (method === "POST") {
       const result = tube.post(req, url, BASE_PATH);
       if (result.handled) {
@@ -211,7 +229,11 @@ async function handleRequest(req, res) {
     res.end(err.message);
   }
 }
+```
 
+## Start
+
+```js # src
 const server = http.createServer(handleRequest);
 server.listen(PORT, () => {
   console.log(`WebDAV server running on http://localhost:${PORT}${BASE_PATH}/`);
@@ -220,3 +242,9 @@ server.listen(PORT, () => {
   console.log("Mount with:");
   console.log(`  mkdir -p /tmp/tube && mount -t webdav http://localhost:${PORT}${BASE_PATH}/ /tmp/tube`);
 });
+```
+
+[journey]:
+prev: tubeRequest
+next:
+The WebDAV server was the first thing built — before the tube existed. It started with direct AWS SDK calls in each provider. Then tubeRequest replaced them. Now the server is just HTTP routing + XML formatting. All the intelligence is in the providers, and all the AWS access is in the processor Lambda on the other side of the tube. This file will probably shrink further as providers become self-registering.
