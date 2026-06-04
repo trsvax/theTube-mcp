@@ -17,7 +17,7 @@ deploy:
 
 ## Mount the tube
 
-A WebDAV server on localhost. Mount it and browse AWS, logs, content, the tube itself — all as folders and files. Finder reads it. `ls` reads it. The MCP server reads it.
+A WebDAV server on localhost. Mount it and browse AWS, logs, content, the tube itself — all as folders and files. Finder reads it. `ls` reads it. AI reads it.
 
 ```
 mkdir -p /tmp/tube && mount -t webdav http://localhost:8080/fs/ /tmp/tube
