@@ -43,7 +43,7 @@ const BASE_PATH = "/fs";
 
 ## WebDAV XML
 
-The protocol is verbose but mechanical. It's XML. Directories are `<D:collection/>`, files have content-length and type. Every response is a `multistatus` wrapper around individual `response` elements.
+The protocol is XML, verbose but mechanical. Directories are `<D:collection/>`, files have content-length and type. Every response is a `multistatus` wrapper around individual `response` elements.
 
 ```js # src
 function multistatus(responses) {
